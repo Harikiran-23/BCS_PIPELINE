@@ -96,7 +96,7 @@ function App() {
           <div className="result">
             <h2>Predicted logS: {result.logS.toFixed(3)}</h2>
             <p><strong>logS Explanation:</strong> {result.logS_explanation}</p>
-            <p><strong>logP Value:</strong> {result.logP.toFixed(3)}</p>
+            <h2>logP Value: {result.logP.toFixed(3)}</h2>
             
             <h2>
               Predicted BCS Class:{" "}
