@@ -8,23 +8,20 @@ from rdkit import Chem
 from rdkit.Chem import Descriptors, rdMolDescriptors, QED, GraphDescriptors, AllChem
 from fastapi.middleware.cors import CORSMiddleware
 
+import bcs_explainer
 
 # ----------------------------
-# Load artifacts
+# Load artifacts for logS
 # ----------------------------
 model_lgbm = joblib.load("lgbm_model.pkl")
 preprocessor = joblib.load("preprocessor.pkl")
 feature_names = joblib.load("lgbm_feature_names.pkl")
 
-# Random Forest classifier
-clf = joblib.load("random_forest_classifier.pkl")
-rf_features = joblib.load("rf_feature_names.pkl")
-
-# Setup SHAP
+# Setup SHAP for logS explanation
 explainer = shap.TreeExplainer(model_lgbm)
 
 # ----------------------------
-# Request Schema
+# FastAPI + CORS
 # ----------------------------
 class SMILESInput(BaseModel):
     smiles: str
@@ -32,24 +29,24 @@ class SMILESInput(BaseModel):
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # React dev server
+    allow_origins=["http://localhost:5173"],  # adjust for deployed origin if needed
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # ----------------------------
-# Utility functions
+# Utility functions (logS flow)
 # ----------------------------
 def smiles_to_ecfp4(smiles, n_bits=1024):
-    mol = Chem.MolFromSmiles(smiles)
-    if mol is None: 
+    mol = Chem.MolFromSmiles(smiles.strip())
+    if mol is None:
         return None
     fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=n_bits)
     return np.array(fp)
 
 def get_molecular_descriptors(smiles):
-    mol = Chem.MolFromSmiles(smiles)
+    mol = Chem.MolFromSmiles(smiles.strip())
     if mol is None:
         return None
     return {
@@ -94,13 +91,14 @@ def generate_lgbm_explanation(instance_features, shap_values, feature_names, top
 # ----------------------------
 @app.post("/predict_logS")
 def predict(input: SMILESInput):
-    descriptors = get_molecular_descriptors(input.smiles)
-    ecfp = smiles_to_ecfp4(input.smiles)
+    smiles = input.smiles
+    descriptors = get_molecular_descriptors(smiles)
+    ecfp = smiles_to_ecfp4(smiles)
 
     if descriptors is None or ecfp is None:
         return {"error": "Invalid SMILES"}
 
-    # --- logS prediction ---
+    # --- logS prediction (unchanged) ---
     X_desc = pd.DataFrame([descriptors])
     X_proc = preprocessor.transform(X_desc)
     X_final = np.hstack([X_proc, ecfp.reshape(1, -1)])
@@ -109,24 +107,36 @@ def predict(input: SMILESInput):
     shap_values = explainer.shap_values(X_final)[0]
     logS_explanation = generate_lgbm_explanation(X_final[0], shap_values, feature_names)
 
-    # --- Random Forest Classification ---
-    # Using logS and MolLogP for RF input
-    X_class = pd.DataFrame([[logS_pred, descriptors['MolLogP']]], columns=rf_features)
-    class_pred = clf.predict(X_class)[0]  # multi-label
-    class_labels = ['I','II','III','IV']
-    predicted_classes = [cls for cls, flag in zip(class_labels, class_pred) if flag==1]
-    if not predicted_classes:
-        predicted_classes = ["Uncertain"]
+    # --- CatBoost classification & explanation (using bcs_explainer) ---
+    # Call explain_bcs with logS_override so CatBoost uses our LGBM logS
+    cb_result = bcs_explainer.explain_bcs(smiles,
+                                         model_dir="./artifacts_bcs",
+                                         top_k_desc=6,
+                                         threshold=0.5,
+                                         logS_override=float(logS_pred))
 
-    class_explanation = (
-        f"Predicted BCS class based on logS={logS_pred:.3f} and logP={descriptors['MolLogP']:.3f}."
-    )
+    # cb_result contains:
+    #  - "probabilities": {label: prob}
+    #  - "predicted_class": label
+    #  - "predicted_flag": 0/1 for selected label
+    #  - "descriptor_share", "ecfp_share", "top_descriptors", "bias_term", etc.
 
-    return {
+    # Build final response merging LGBM outputs + CatBoost explainer outputs
+    response = {
         "Values": descriptors,
         "logS": float(logS_pred),
         "logP": float(descriptors['MolLogP']),
         "logS_explanation": logS_explanation,
-        "class": predicted_classes,
-        "class_explanation": class_explanation
+        # CatBoost outputs
+        "cb_probabilities": cb_result.get("probabilities"),
+        "cb_predicted_class": cb_result.get("predicted_class"),
+        "cb_predicted_flag": int(cb_result.get("predicted_flag", 0)),
+        "cb_descriptor_share": cb_result.get("descriptor_share"),   
+        "cb_ecfp_share": cb_result.get("ecfp_share"),
+        "cb_top_descriptors": cb_result.get("top_descriptors"),
+        "cb_bias": cb_result.get("bias_term"),
+        # Human-friendly class explanation
+        "class_explanation": f"Predicted BCS class (CatBoost): {cb_result.get('predicted_class')}"
     }
+
+    return response
