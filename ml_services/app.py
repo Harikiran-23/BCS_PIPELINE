@@ -96,7 +96,9 @@ def predict(input: SMILESInput):
     ecfp = smiles_to_ecfp4(smiles)
 
     if descriptors is None or ecfp is None:
-        return {"error": "Invalid SMILES"}
+        return {
+        "error": "Invalid SMILES string. Please enter a valid chemical SMILES."
+    }
 
     # --- logS prediction (unchanged) ---
     X_desc = pd.DataFrame([descriptors])

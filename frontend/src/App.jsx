@@ -22,7 +22,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
-  const handlePredict = async () => {
+    const handlePredict = async () => {
     if (!smiles.trim()) {
       setErrorMsg("Please enter a SMILES string.");
       return;
@@ -39,6 +39,11 @@ export default function App() {
         { timeout: 20000 }
       );
       console.log("API response:", res.data);
+      if (res.data?.error) {
+        alert(res.data.error);       
+        setResult(null);              
+        return;
+      }
       if (!res.data || typeof res.data !== "object") {
         throw new Error("Invalid response from server");
       }
